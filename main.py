@@ -53,7 +53,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_text},
             ],
-            model="llama-3.3-70b-versatile",
+            model="llama3-70b-8192",
         )
         
         bot_response = chat_completion.choices[0].message.content
