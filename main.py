@@ -16,7 +16,11 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+# الموديل الأساسي (تقدر تغيره من Environment Variables باسم GROQ_MODEL)
+# وإذا فشل يجرب الموديلات الاحتياطية بالترتيب
+PRIMARY_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+FALLBACK_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
+MODELS_TO_TRY = [PRIMARY_MODEL] + [m for m in FALLBACK_MODELS if m != PRIMARY_MODEL]
 
 
 # خادم ويب وهمي لتلبية متطلبات Render Web Service وبقاء البوت شغالاً
@@ -50,6 +54,25 @@ SYSTEM_PROMPT = (
 )
 
 
+async def ask_groq(user_text: str) -> str:
+    """يجرب الموديلات بالترتيب لين يشتغل واحد منها."""
+    last_error = None
+    for model in MODELS_TO_TRY:
+        try:
+            completion = await client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_text},
+                ],
+                model=model,
+            )
+            return completion.choices[0].message.content or "ما قدرت أرد، جرب مرة ثانية."
+        except Exception as e:
+            logger.error(f"Model {model} failed: {e}")
+            last_error = e
+    raise last_error
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     first_name = update.effective_user.first_name if update.effective_user else "يا غالي"
     await update.message.reply_text(f"هلا والله {first_name}! أمرني وش بغيت تسأل عنه اليوم؟")
@@ -59,22 +82,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_text = update.message.text
 
     try:
-        chat_completion = await client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text},
-            ],
-            model=MODEL_NAME,
-        )
-
-        bot_response = chat_completion.choices[0].message.content
+        bot_response = await ask_groq(user_text)
 
         # تيليجرام يقبل 4096 حرف كحد أقصى في الرسالة الواحدة
         for i in range(0, len(bot_response), 4000):
             await update.message.reply_text(bot_response[i:i + 4000])
 
     except Exception as e:
-        logger.error(f"Error calling Groq API: {e}")
+        logger.error(f"All models failed: {e}")
         await update.message.reply_text("حصل مشكلة بسيطة في الاتصال بالذكاء، جرب مرة ثانية.")
 
 
