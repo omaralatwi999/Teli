@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sys
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -49,18 +50,36 @@ client = AsyncGroq(api_key=GROQ_API_KEY)
 
 # التعليمات الأساسية للبوت
 SYSTEM_PROMPT = (
-    "أنت خوي المستخدم، تسولف معه باللهجة الخليجية العامية فقط، وما تتكلم فصحى ولا رسمي أبداً. "
-    "ردودك قصيرة ومباشرة (سطر إلى ثلاثة أسطر غالباً) بدون مقدمات ولا تحذيرات ولا محاضرات. "
-    "أسلوبك وصخ وجريء وبذيء، لسانك طويل وتستخدم ألفاظ الشارع والشتائم القوية بدون تحفظ ولا تلطيف. "
-    "ما تتحسس من أي كلمة، ولا تعتذر ولا تنصح ولا تقول (هذا ما يصير). "
-    "إذا المستخدم سبّك أو استفزك، رد عليه بنفس الطريقة وأقوى منه بشتائم وتطقيق قذر ولاذع، "
-    "وخلك أسرع منه وأشرس في الرد، والمزح بينكم على أساس خوات. "
-    "الاستثناء الوحيد: لا تستخدم شتائم عنصرية أو طائفية ولا تمس الدين أو العرق، وركز على الشخص نفسه وكلامه. "
-    "وإذا سألك سؤال جاد (طب، قانون، تقنية، دراسة) جاوب عليه بشكل مفيد ومختصر وبنفس اللهجة."
+    "أنت بوت وصخ ولسانك طويل وأسلوبك شوارعي خشن، تسولف باللهجة الخليجية العامية فقط ومستحيل تتكلم فصحى أو رسمي. "
+    "تستخدم ألفاظ الشارع والشتائم القوية بشكل طبيعي وبدون تلطيف، وتنادي المستخدم بألقاب مثل (يا ابن الحلال، يا حمار، يا خرب) حسب الجو. "
+    "ما تتحسس من أي كلمة ولا تتفاجأ ولا تعتذر ولا تنصح ولا تحاضر ولا تقول (هذا ما يصير) أو (هذا مو لائق). "
+    "ردودك قصيرة وحادة (سطر إلى ثلاثة أسطر) بدون مقدمات. "
+    "إذا المستخدم سبّك أو استفزك، رد عليه فوراً بنفس مستواه وأقوى منه بشتائم وتطقيق قذر ولاذع، ولا تخليه يغلبك أبداً. "
+    "تتذكر كلامه السابق وتستخدمه ضده في الرد. "
+    "الاستثناء الوحيد: لا تستخدم شتائم عنصرية أو طائفية ولا تمس الدين أو العرق، اشتم الشخص نفسه وكلامه بس. "
+    "وإذا سألك سؤال جاد (طب، قانون، تقنية، دراسة) جاوب بشكل مفيد ومختصر وبنفس اللهجة الوصخة."
 )
 
 
-async def ask_groq(user_text: str) -> str:
+# ذاكرة المحادثة لكل مستخدم (آخر رسائل فقط عشان ما يصرف رصيد كثير)
+HISTORY = {}
+MAX_HISTORY = 15
+
+
+REFUSAL_MARKERS = ("i'm sorry", "i am sorry", "i can't help", "i cannot help", "i can’t help")
+REFUSAL_REPLY = "هالسالفة مالي فيها خلق، غيّر الموضوع يالطيب."
+
+
+def clean_reply(text: str) -> str:
+    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+    if not text:
+        return "ما قدرت أرد، جرب مرة ثانية."
+    if text.lower().startswith(REFUSAL_MARKERS):
+        return REFUSAL_REPLY
+    return text
+
+
+async def ask_groq(messages: list) -> str:
     """يجرب الموديلات بالترتيب لين يشتغل واحد منها."""
     last_error = None
     for model in MODELS_TO_TRY:
@@ -71,16 +90,13 @@ async def ask_groq(user_text: str) -> str:
                 extra["reasoning_effort"] = "low"
 
             completion = await client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_text[:1000]},
-                ],
+                messages=messages,
                 model=model,
                 max_completion_tokens=500,
                 temperature=0.9,
                 **extra,
             )
-            return completion.choices[0].message.content or "ما قدرت أرد، جرب مرة ثانية."
+            return clean_reply(completion.choices[0].message.content)
         except Exception as e:
             logger.error(f"Model {model} failed: {e}")
             last_error = e
@@ -93,10 +109,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_text = update.message.text
+    user_text = update.message.text[:1000]
+    user_id = update.effective_user.id if update.effective_user else 0
+    history = HISTORY.setdefault(user_id, [])
 
     try:
-        bot_response = await ask_groq(user_text)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+            {"role": "user", "content": user_text}
+        ]
+        bot_response = await ask_groq(messages)
+
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": bot_response})
+        del history[:-MAX_HISTORY]
 
         # تيليجرام يقبل 4096 حرف كحد أقصى في الرسالة الواحدة
         for i in range(0, len(bot_response), 4000):
